@@ -1,21 +1,21 @@
 terraform {
   required_version = ">= 1.12.2"
-    required_providers {
-      aws = {
-        source = "hashicorp/aws"
-        version = "~> 6.0"
-      }
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
     }
+  }
 
   backend "s3" {
-    bucket = "com.sujan-sapkota-lf-terraform-state-bucket"
-    key    = "ec2-instance/terraform.tfstate"
-    region = "us-east-1"
+    bucket       = "com.sujan-sapkota-lf-terraform-state-bucket"
+    key          = "ec2-instance/terraform.tfstate"
+    region       = "us-east-1"
     use_lockfile = true
   }
 }
 
-  
+
 data "aws_vpc" "sujan-vpc" {
   filter {
     name   = "tag:Name"
@@ -45,7 +45,7 @@ resource "aws_security_group" "secgrp" {
   description = "secgrp_for_ec2"
   vpc_id      = data.aws_vpc.sujan-vpc.id
 
-  tags = merge(local.common-tags, {Name: "sujan-sapkota-secgrp"})
+  tags = merge(local.common-tags, { Name : "sujan-sapkota-secgrp" })
 }
 
 resource "aws_vpc_security_group_ingress_rule" "ssh_rule" {
@@ -98,19 +98,19 @@ resource "aws_iam_role" "ec2_s3_role" {
     ]
   })
 
-  tags = merge(local.common-tags, {Name: "sujan-sapkota-ec2-s3-role"})
+  tags = merge(local.common-tags, { Name : "sujan-sapkota-ec2-s3-role" })
 }
 
 resource "aws_iam_instance_profile" "ec2_profile" {
   name = "sujan-sapkota-ec2-profile"
   role = aws_iam_role.ec2_s3_role.name
 
-  tags = merge(local.common-tags, {Name: "sujan-sapkota-ec2-profile"})
+  tags = merge(local.common-tags, { Name : "sujan-sapkota-ec2-profile" })
 }
 
 resource "aws_instance" "myinstance" {
-  ami = "ami-05ffe3c48a9991133"
-  instance_type = "t2.micro"
+  ami                         = "ami-05ffe3c48a9991133"
+  instance_type               = "t2.micro"
   associate_public_ip_address = true
 
   subnet_id              = data.aws_subnet.sujan-subnet.id
@@ -118,16 +118,16 @@ resource "aws_instance" "myinstance" {
   key_name               = "sujansapktoa-ec2-instance-1"
   iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
 
-  tags = merge(local.common-tags, {Name: "sujan-sapkota-EC2"})
+  tags = merge(local.common-tags, { Name : "sujan-sapkota-EC2" })
 }
 
 output "ec2_arn" {
-  value = aws_instance.myinstance.arn
+  value       = aws_instance.myinstance.arn
   description = "The arn of the EC2 instance"
 }
 
 output "ec2_role_arn" {
-  value = aws_iam_role.ec2_s3_role.arn
+  value       = aws_iam_role.ec2_s3_role.arn
   description = "The ARN of the IAM role assumed by the EC2 instance"
 }
 

@@ -1,5 +1,5 @@
-    locals {
-    common-tags = {
+locals {
+  common-tags = {
     Creator = "sujan sapkota"
   }
 }
