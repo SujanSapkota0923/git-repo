@@ -1,4 +1,5 @@
 terraform {
+  required_version = ">= 1.12.2"
   backend "s3" {
     bucket       = "com.sujan-sapkota-lf-terraform-state-bucket"
     key          = "s3-instance/terraform.tfstate"
