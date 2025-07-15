@@ -38,6 +38,7 @@ resource "aws_s3_bucket" "mybucket" {
 
 resource "aws_s3_bucket_versioning" "versioning_sujan" {
   bucket = aws_s3_bucket.mybucket.id
+  
   versioning_configuration {
     status = "Enabled"
   }
