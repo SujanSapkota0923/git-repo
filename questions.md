@@ -23,7 +23,7 @@ permissions:
 env:
   TF_VERSION: "1.12.2"
   TFLINT_VERSION: "v0.47.0"
-  TFSEC_VERSION: "v1.28.0"
+  TFSEC_VERSION: "v1.28.0"adfa
 
 jobs:
   detect-changes:
