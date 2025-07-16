@@ -20,7 +20,7 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 
 resource "aws_instance" "ec2" {
   ami           = "ami-0150ccaf51ab55a51"
-  key_name = "sujannvkey"
+  key_name = "sujan-sapkota-keypair-for-ssh-ec2-instane"
   instance_type = "t2.micro"
   subnet_id     = "subnet-0fdfb5252ab10392f"
   vpc_security_group_ids = ["sg-004d2faf4052a0c12"]
