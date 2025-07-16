@@ -1,0 +1,473 @@
+name: CI
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - main
+    paths:
+      - 'infrastructure/**'
+      - '.github/workflows/**'
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    name: Terraform Lint/Validate/Format
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.0
+          terraform_wrapper: true
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.52.0
+          tflint_wrapper: true
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+        working-directory: ./infrastructure
+        continue-on-error: true
+        
+      - name: Select or Create Workspace
+        working-directory: ./infrastructure
+        run: |
+          set -euo pipefail
+
+          # Determine workspace based on branch name
+          if [[ "${GITHUB_REF##*/}" == "main" ]]; then
+            WORKSPACE="prod"
+          else
+            WORKSPACE="dev"
+          fi
+          
+          echo "Branch: ${{ github.ref }}"
+          echo "Using Terraform workspace: $WORKSPACE"
+
+          # Normalize and search for exact match
+          EXISTING=$(terraform workspace list | sed 's/^[* ]*//' | grep -Fx "$WORKSPACE" || true)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Selecting existing workspace: $WORKSPACE"
+            terraform workspace select "$WORKSPACE"
+          else
+            echo "Creating new workspace: $WORKSPACE"
+            terraform workspace new "$WORKSPACE"
+          fi
+
+
+      - name: Run TFLint
+        id: tflint
+        working-directory: ./infrastructure
+        run: |
+          set -o pipefail
+          tflint --format=compact |& tee tflint_output.txt
+          echo "exitcode=$?" >> $GITHUB_OUTPUT
+          echo "stdout<<EOF" >> $GITHUB_OUTPUT
+          cat tflint_output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "stderr<<EOF" >> $GITHUB_OUTPUT
+          cat tflint_output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Terraform Format
+        id: fmt
+        working-directory: ./infrastructure
+        run: |
+          set -o pipefail
+          terraform fmt -check -recursive -diff |& tee fmt_output.txt
+          echo "exitcode=$?" >> $GITHUB_OUTPUT
+          echo "stdout<<EOF" >> $GITHUB_OUTPUT
+          cat fmt_output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "stderr<<EOF" >> $GITHUB_OUTPUT
+          cat fmt_output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Terraform Validate
+        id: validate
+        working-directory: ./infrastructure
+        run: |
+          set -o pipefail
+          terraform validate -no-color |& tee validate_output.txt
+          echo "exitcode=$?" >> $GITHUB_OUTPUT
+          echo "stdout<<EOF" >> $GITHUB_OUTPUT
+          cat validate_output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "stderr<<EOF" >> $GITHUB_OUTPUT
+          cat validate_output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+
+      - name: Comment TFLint Results
+        uses: GetTerminus/terraform-pr-commenter@v3
+        if: steps.tflint.outputs.exitcode != '0'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_GITHUB }}
+        with:
+          commenter_type: "tflint"
+          commenter_input: ${{ format('{0}{1}', steps.tflint.outputs.stdout, steps.tflint.outputs.stderr) }}
+          commenter_exitcode: ${{ steps.tflint.outputs.exitcode }}
+
+      - name: Comment Terraform Format Results
+        uses: GetTerminus/terraform-pr-commenter@v3
+        if: steps.fmt.outputs.exitcode != '0'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_GITHUB }}
+        with:
+          commenter_type: "fmt"
+          commenter_input: ${{ format('{0}{1}', steps.fmt.outputs.stdout, steps.fmt.outputs.stderr) }}
+          commenter_exitcode: ${{ steps.fmt.outputs.exitcode }}
+
+      - name: Comment Terraform Validate Results
+        uses: GetTerminus/terraform-pr-commenter@v3
+        if: steps.validate.outputs.exitcode != '0'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_GITHUB }}
+        with:
+          commenter_type: "validate"
+          commenter_input: ${{ format('{0}{1}', steps.validate.outputs.stdout, steps.validate.outputs.stderr) }}
+          commenter_exitcode: ${{ steps.validate.outputs.exitcode }}
+
+      - name: Block PR if any checks failed
+        if: steps.init.outcome == 'failure' || steps.tflint.outputs.exitcode != '0' || steps.fmt.outputs.exitcode != '0' || steps.validate.outputs.exitcode != '0'
+        run: |
+          echo "::error::Critical issues found in Terraform code. Please fix the above issues before merging."
+          exit 1
+
+
+  security-scan:
+    runs-on: ubuntu-latest
+    name: Terraform Security Scan
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write 
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.0
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ./infrastructure
+        
+      - name: Select or Create Workspace
+        working-directory: ./infrastructure
+        run: |
+          set -euo pipefail
+
+          # Determine workspace based on branch name
+          if [[ "${GITHUB_REF##*/}" == "main" ]]; then
+            WORKSPACE="prod"
+          else
+            WORKSPACE="dev"
+          fi
+          
+          echo "Branch: ${{ github.ref }}"
+          echo "Using Terraform workspace: $WORKSPACE"
+
+          # Normalize and search for exact match
+          EXISTING=$(terraform workspace list | sed 's/^[* ]*//' | grep -Fx "$WORKSPACE" || true)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Selecting existing workspace: $WORKSPACE"
+            terraform workspace select "$WORKSPACE"
+          else
+            echo "Creating new workspace: $WORKSPACE"
+            terraform workspace new "$WORKSPACE"
+          fi
+
+
+      - name: Check using tfsec and comment Results on PR
+        id: tfsec
+        uses: tfsec/tfsec-pr-commenter-action@v1.3.1
+        with:
+          github_token: ${{ secrets.PAT_GITHUB }}
+          working_directory: ./infrastructure
+
+
+      - name: Block PR if issues found
+        if: failure() && steps.tfsec.outcome == 'failure'
+        run: |
+          echo "::error::Security issues found in Terraform code. Please fix critical and high severity issues before merging."
+          exit 1
+  
+  plan:
+    runs-on: ubuntu-latest
+    name: Terraform Plan
+    needs: [lint, security-scan]
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.0
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ./infrastructure
+        
+      - name: Select or Create Workspace
+        working-directory: ./infrastructure
+        run: |
+          set -euo pipefail
+
+          # Determine workspace based on branch name
+          if [[ "${GITHUB_REF##*/}" == "main" ]]; then
+            WORKSPACE="prod"
+          else
+            WORKSPACE="dev"
+          fi
+          
+          echo "Branch: ${{ github.ref }}"
+          echo "Using Terraform workspace: $WORKSPACE"
+
+          # Normalize and search for exact match
+          EXISTING=$(terraform workspace list | sed 's/^[* ]*//' | grep -Fx "$WORKSPACE" || true)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Selecting existing workspace: $WORKSPACE"
+            terraform workspace select "$WORKSPACE"
+          else
+            echo "Creating new workspace: $WORKSPACE"
+            terraform workspace new "$WORKSPACE"
+          fi
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -out=tfplan
+        working-directory: ./infrastructure
+
+      - name: Comment Terraform Plan Results
+        uses: GetTerminus/terraform-pr-commenter@v1
+        with:
+          commenter_type: "plan"
+          commenter_input: ${{ steps.plan.outputs.stdout }}
+          commenter_exitcode: ${{ steps.plan.outputs.exitcode }}
+          
+  build-artifact:
+    name: Build Artifact
+    runs-on: ubuntu-latest
+    needs: [lint, security-scan, plan]
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get short commit hash
+        id: commit_hash
+        run: |
+          short_hash=$(git rev-parse --short=6 HEAD)
+          echo "short_hash=$short_hash" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Get latest version
+        id: latest_version
+        run: |
+          branch="${{ github.head_ref || github.ref_name }}"
+          if [[ "$branch" == "main" ]]; then
+            latest_tag=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || echo "")
+            echo "latest_version=${latest_tag:-v1.0.0}" >> $GITHUB_OUTPUT
+          else
+            if [[ -f dev_version.txt ]]; then
+              latest_version=$(tail -n 1 dev_version.txt | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\+dev\+[0-9a-f]{6}$' || echo "")
+              if [[ -z "$latest_version" ]]; then
+                latest_version=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || echo "")
+              fi
+            else
+              latest_version=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || echo "")
+            fi
+            echo "latest_version=${latest_version:-v1.0.0}" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Determine version bump
+        id: version_bump
+        run: |
+          latest_version="${{ steps.latest_version.outputs.latest_version }}"
+          branch="${{ github.head_ref || github.ref_name }}"
+          
+          # Default to patch bump
+          bump_type="patch"
+          
+          # For PRs targeting dev branch or pushes to dev, determine bump based on source branch prefix
+          if [[ "${{ github.base_ref }}" == "dev" || "$branch" == "dev" ]]; then
+            if [[ "$branch" =~ ^major ]]; then
+              bump_type="major"
+            elif [[ "$branch" =~ ^minor ]]; then
+              bump_type="minor"
+            else
+              bump_type="patch"
+            fi
+          # For main branch, determine bump based on merged dev branch history
+          elif [[ "$branch" == "main" ]]; then
+            # Check dev branch history for major/minor/patch branches
+            git fetch origin dev || true
+            git log --pretty=%s origin/dev --grep='Merge pull request' > merge_commits.txt || echo "" > merge_commits.txt
+            if grep -qE 'from .*/major' merge_commits.txt; then
+              bump_type="major"
+            elif grep -qE 'from .*/minor' merge_commits.txt; then
+              bump_type="minor"
+            else
+              bump_type="patch"
+            fi
+          fi
+          
+          # Calculate new version
+          # Strip +dev+hash suffix for dev versions
+          if [[ "$latest_version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(\+dev\+[0-9a-f]{6})?$ ]]; then
+            major=${BASH_REMATCH[1]}
+            minor=${BASH_REMATCH[2]}
+            patch=${BASH_REMATCH[3]}
+          elif [[ "$latest_version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            major=${BASH_REMATCH[1]}
+            minor=${BASH_REMATCH[2]}
+            patch=${BASH_REMATCH[3]}
+          else
+            major=1
+            minor=0
+            patch=0
+          fi
+          
+          
+          if [[ "$bump_type" == "major" ]]; then
+            major=$((major + 1)) || { echo "ERROR: Failed to increment major version" >&2; exit 1; }
+            minor=0
+            patch=0
+          elif [[ "$bump_type" == "minor" ]]; then
+            minor=$((minor + 1)) || { echo "ERROR: Failed to increment minor version" >&2; exit 1; }
+            patch=0
+          else
+            patch=$((patch + 1)) || { echo "ERROR: Failed to increment patch version" >&2; exit 1; }
+          fi
+          
+          new_version="v${major}.${minor}.${patch}"
+          
+          # Ensure $GITHUB_OUTPUT is writable
+          if ! touch "$GITHUB_OUTPUT" 2>/dev/null; then
+            echo "ERROR: Cannot write to $GITHUB_OUTPUT" >&2
+            exit 1
+          fi
+          
+          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "bump_type=$bump_type" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Generate zip artifact
+        run: |
+          version="${{ steps.version_bump.outputs.new_version }}"
+          short_hash="${{ steps.commit_hash.outputs.short_hash }}"
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            zip -r "infrastructure-artifact-${version}.zip" ./infrastructure
+          else
+            mkdir temp-folder
+            cp -r infrastructure temp-folder/infrastructure
+          fi
+        working-directory: .
+
+      - name: Upload build artifact for dev
+        if: github.ref_name != 'main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: "infrastructure-artifact-${{ steps.version_bump.outputs.new_version }}+dev+${{ steps.commit_hash.outputs.short_hash }}"
+          path: ./temp-folder
+          retention-days: 7
+
+      - name: Create GitHub Tag
+        if: github.ref_name == 'main'
+        uses: mathieudutour/github-tag-action@v6.1
+        id: tag_version
+        with:
+          github_token: ${{ secrets.PAT_GITHUB }}
+          custom_tag: ${{ steps.version_bump.outputs.new_version }}
+          tag_prefix: ""
+          create_annotated_tag: true
+
+      - name: Create Release on main
+        if: github.ref_name == 'main'
+        uses: marvinpinto/action-automatic-releases@latest
+        with:
+          repo_token: ${{ secrets.PAT_GITHUB }}
+          prerelease: false
+          automatic_release_tag: ${{ steps.tag_version.outputs.new_tag }}
+          title: Release ${{ steps.version_bump.outputs.new_version }}
+          files: "infrastructure-artifact-${{ steps.version_bump.outputs.new_version }}.zip"
+
+      - name: Save Dev Version
+        if: github.event_name == 'pull_request' && github.head_ref == 'dev' || github.ref_name == 'dev'
+        run: |
+          version="${{ steps.version_bump.outputs.new_version }}"
+          short_hash="${{ steps.commit_hash.outputs.short_hash }}"
+          echo "${version}+dev+${short_hash}" >> dev_version.txt || { echo "ERROR: Failed to write to dev_version.txt" >&2; exit 1; }
+        working-directory: .
+
+      - name: Commit Dev Version File
+        if: github.event_name == 'pull_request' && github.head_ref == 'dev' || github.ref_name == 'dev'
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add dev_version.txt || { echo "ERROR: Failed to add dev_version.txt" >&2; exit 1; }
+          git commit -m "Update dev version to ${{ steps.version_bump.outputs.new_version }}+dev+${{ steps.commit_hash.outputs.short_hash }}" || { echo "ERROR: Failed to commit dev_version.txt" >&2; exit 1; }
+          git push origin HEAD:dev || { echo "ERROR: Failed to push to dev branch" >&2; exit 1; }
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_GITHUB }}
+
+      - name: Comment Version on PR
+        if: github.event_name == 'pull_request'
+        uses: mshick/add-pr-comment@v2
+        with:
+          message: |
+            New version tag: **${{ steps.version_bump.outputs.new_version }}** (Type: ${{ steps.version_bump.outputs.bump_type }})
+            ${{ github.ref_name != 'main' && format('Build artifact: infrastructure-artifact-{0}+dev+{1}.zip', steps.version_bump.outputs.new_version, steps.commit_hash.outputs.short_hash) || format('Release artifact: infrastructure-artifact-{0}.zip', steps.version_bump.outputs.new_version) }}
+          repo_token: ${{ secrets.PAT_GITHUB }}

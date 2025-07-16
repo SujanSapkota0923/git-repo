@@ -1,0 +1,137 @@
+name: Deploy
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_type:
+        description: 'Type of deployment'
+        required: true
+        type: choice
+        options:
+          - release
+          - build
+      artifact_version:
+        description: 'Artifact version (e.g., v1.2.3 )'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS Credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: Download Artifact from Build by Name
+        if: github.event.inputs.deploy_type == 'build'
+        env:
+          TOKEN: ${{ secrets.PAT_GITHUB }}
+          REPO: ${{ github.repository }}
+          ARTIFACT_NAME: infrastructure-artifact-${{ github.event.inputs.artifact_version }}
+        run: |
+          mkdir -p artifacts
+          
+
+          response=$(curl -sSL \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/artifacts")
+
+          artifact_id=$(echo "$response" | jq -r --arg NAME "$ARTIFACT_NAME" '.artifacts[] | select(.name == $NAME) | .id')
+
+          if [[ -z "$artifact_id" || "$artifact_id" == "null" ]]; then
+            echo "Artifact with name $ARTIFACT_NAME not found!"
+            exit 1
+          fi
+
+          curl -fL -o "./artifacts/${ARTIFACT_NAME}.zip" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/artifacts/$artifact_id/zip"
+
+      - name: Download artifact from GitHub Release via API
+        if: github.event.inputs.deploy_type == 'release'
+        env:
+          TAG: ${{ github.event.inputs.artifact_version }}
+          FILE: infrastructure-artifact-${{ github.event.inputs.artifact_version }}.zip
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ secrets.PAT_GITHUB }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+
+          release_api_url="https://api.github.com/repos/$REPO/releases/tags/$TAG"
+          release_info=$(curl -sSL \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$release_api_url")
+
+          asset_id=$(echo "$release_info" | jq -r --arg NAME "$FILE" '.assets[] | select(.name == $NAME) | .id')
+
+          if [[ -z "$asset_id" || "$asset_id" == "null" ]]; then
+            echo "Artifact '$FILE' not found in release assets."
+            exit 1
+          fi
+
+          asset_url="https://api.github.com/repos/$REPO/releases/assets/$asset_id"
+          output_file="./artifacts/$FILE"
+
+          curl -fL \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/octet-stream" \
+            "$asset_url" -o "$output_file"
+
+
+
+      - name: Extract Zip File
+        run: |
+          unzip -o ./artifacts/infrastructure-artifact-${{ github.event.inputs.artifact_version }}.zip -d .
+        working-directory: .
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.0
+
+      - name: Terraform Init
+        working-directory: infrastructure
+        run: terraform init
+
+      - name: Select or Create Workspace
+        working-directory: infrastructure
+        run: |
+          set -euo pipefail
+
+          # Set workspace based on deploy_type
+          if [ "${{ github.event.inputs.deploy_type }}" = "release" ]; then
+            WORKSPACE="prod"
+          else
+            WORKSPACE="dev"
+          fi
+
+          EXISTING=$(terraform workspace list | sed 's/^[* ]*//' | grep -Fx "$WORKSPACE" || true)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Workspace '$WORKSPACE' exists. Selecting it..."
+            terraform workspace select "$WORKSPACE"
+          else
+            echo "Workspace '$WORKSPACE' not found. Creating it..."
+            terraform workspace new "$WORKSPACE"
+          fi
+
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: infrastructure
+        run: terraform plan -no-color -out=tfplan
+        
+
+      - name: Terraform Apply
+        working-directory: infrastructure
+        run: terraform apply -auto-approve tfplan
+        

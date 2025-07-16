@@ -1,0 +1,86 @@
+name: Destroy Infrastructure
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to destroy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: 'dev'
+      confirmation:
+        description: 'Type "DESTROY" to confirm deletion of resources'
+        required: true
+        type: string
+
+jobs:
+  validate-input:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate confirmation
+        if: ${{ github.event.inputs.confirmation != 'DESTROY' }}
+        run: |
+          echo "::error::Confirmation text must be exactly 'DESTROY'. Please try again with correct confirmation."
+          exit 1
+
+  destroy:
+    runs-on: ubuntu-latest
+    needs: validate-input
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.0
+
+      - name: Terraform Init
+        working-directory: infrastructure
+        run: terraform init
+
+      - name: Select Workspace
+        working-directory: infrastructure
+        run: |
+          set -euo pipefail
+
+          # Set workspace based on environment input
+          WORKSPACE="${{ github.event.inputs.environment }}"
+
+          echo "Using Terraform workspace: $WORKSPACE"
+
+          # Clean match for existing workspaces
+          EXISTING=$(terraform workspace list | sed 's/^[* ]*//' | grep -Fx "$WORKSPACE" || true)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Workspace '$WORKSPACE' exists. Selecting it..."
+            terraform workspace select "$WORKSPACE"
+          else
+            echo "Workspace '$WORKSPACE' not found. Cannot destroy non-existent workspace!"
+            exit 1
+          fi
+
+      - name: Terraform Plan Destroy
+        working-directory: infrastructure
+        run: terraform plan -destroy -no-color -out=tfdestroyplan
+
+      - name: Terraform Destroy
+        working-directory: infrastructure
+        run: |
+          echo "DESTROYING ALL RESOURCES IN ${{ github.event.inputs.environment }} WORKSPACE"
+          terraform apply -auto-approve tfdestroyplan
+
+      - name: Confirmation
+        run: |
+          echo "All resources in the ${{ github.event.inputs.environment }} workspace have been destroyed"
